@@ -2,6 +2,8 @@
 
 MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments.
 
+> **Upgrading from 0.x?** See the [Migration Guide](MIGRATION-1.0.md) for the complete list of renamed types, methods, and properties.
+
 ## Features
 
 - **WebSocket transport** - Connect to remote MQTT brokers via `ws://` or `wss://`
@@ -28,7 +30,7 @@ npm install mqtt5-wasm
 
 ```toml
 [dependencies]
-mqtt5-wasm = "0.10"
+mqtt5-wasm = "1.0"
 ```
 
 Build with wasm-bindgen:
@@ -43,14 +45,14 @@ wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/mq
 ### Basic Example
 
 ```javascript
-import init, { WasmMqttClient } from "mqtt5-wasm";
+import init, { MqttClient } from "mqtt5-wasm";
 
 await init();
-const client = new WasmMqttClient("browser-client");
+const client = new MqttClient("browser-client");
 
 await client.connect("wss://broker.example.com:8084/mqtt");
 
-await client.subscribe_with_callback("sensors/#", (topic, payload) => {
+await client.subscribeWithCallback("sensors/#", (topic, payload) => {
   console.log(`${topic}: ${new TextDecoder().decode(payload)}`);
 });
 
@@ -62,17 +64,17 @@ await client.disconnect();
 ### Event Callbacks
 
 ```javascript
-const client = new WasmMqttClient("browser-client");
+const client = new MqttClient("browser-client");
 
-client.on_connect((reasonCode, sessionPresent) => {
+client.onConnect((reasonCode, sessionPresent) => {
   console.log(`Connected: reason=${reasonCode}, session=${sessionPresent}`);
 });
 
-client.on_disconnect(() => {
+client.onDisconnect(() => {
   console.log("Disconnected from broker");
 });
 
-client.on_error((error) => {
+client.onError((error) => {
   console.error(`Error: ${error}`);
 });
 
@@ -82,13 +84,13 @@ await client.connect("wss://broker.example.com:8084/mqtt");
 ### Connectivity Detection
 
 ```javascript
-const client = new WasmMqttClient("browser-client");
+const client = new MqttClient("browser-client");
 
-client.on_connectivity_change((online) => {
+client.onConnectivityChange((online) => {
   console.log(online ? "Network available" : "Network lost");
 });
 
-if (!client.is_browser_online()) {
+if (!client.isBrowserOnline()) {
   console.log("Currently offline");
 }
 ```
@@ -96,15 +98,15 @@ if (!client.is_browser_online()) {
 ### In-Browser Broker
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from "mqtt5-wasm";
+import init, { Broker, MqttClient } from "mqtt5-wasm";
 
 await init();
 
-const broker = new WasmBroker();
-const port = broker.create_client_port();
+const broker = new Broker();
+const port = broker.createClientPort();
 
-const client = new WasmMqttClient("local-client");
-await client.connect_message_port(port);
+const client = new MqttClient("local-client");
+await client.connectMessagePort(port);
 ```
 
 ### Broker Lifecycle Events
@@ -112,29 +114,29 @@ await client.connect_message_port(port);
 Monitor broker activity with lifecycle callbacks:
 
 ```javascript
-const broker = new WasmBroker();
+const broker = new Broker();
 
-broker.on_client_connect((event) => {
+broker.onClientConnect((event) => {
   console.log(`Client connected: ${event.clientId}, cleanStart: ${event.cleanStart}`);
 });
 
-broker.on_client_disconnect((event) => {
+broker.onClientDisconnect((event) => {
   console.log(`Client disconnected: ${event.clientId}, reason: ${event.reason}`);
 });
 
-broker.on_client_publish((event) => {
+broker.onClientPublish((event) => {
   console.log(`Publish: ${event.topic} (${event.payloadSize} bytes, QoS ${event.qos})`);
 });
 
-broker.on_client_subscribe((event) => {
+broker.onClientSubscribe((event) => {
   console.log(`Subscribe: ${event.clientId} -> ${event.subscriptions.map(s => s.topic)}`);
 });
 
-broker.on_client_unsubscribe((event) => {
+broker.onClientUnsubscribe((event) => {
   console.log(`Unsubscribe: ${event.clientId} -> ${event.topics}`);
 });
 
-broker.on_message_delivered((event) => {
+broker.onMessageDelivered((event) => {
   console.log(`Message delivered: packetId=${event.packetId}, QoS ${event.qos}`);
 });
 ```

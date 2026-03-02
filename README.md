@@ -322,10 +322,10 @@ npm install mqtt5-wasm
 Connect to remote MQTT brokers using WebSocket transport:
 
 ```javascript
-import init, { WasmMqttClient } from "mqtt5-wasm";
+import init, { MqttClient } from "mqtt5-wasm";
 
 await init();
-const client = new WasmMqttClient("browser-client");
+const client = new MqttClient("browser-client");
 
 await client.connect("ws://broker.example.com:8080/mqtt");
 ```
@@ -335,14 +335,14 @@ await client.connect("ws://broker.example.com:8080/mqtt");
 MQTT broker in a browser tab:
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from "mqtt5-wasm";
+import init, { Broker, MqttClient } from "mqtt5-wasm";
 
 await init();
-const broker = new WasmBroker();
-const client = new WasmMqttClient("local-client");
+const broker = new Broker();
+const client = new MqttClient("local-client");
 
-const port = broker.create_client_port();
-await client.connect_message_port(port);
+const port = broker.createClientPort();
+await client.connectMessagePort(port);
 ```
 
 #### Cross-Tab Mode (BroadcastChannel)
@@ -350,7 +350,7 @@ await client.connect_message_port(port);
 Communication across browser tabs via BroadcastChannel API:
 
 ```javascript
-await client.connect_broadcast_channel("mqtt-channel");
+await client.connectBroadcastChannel("mqtt-channel");
 ```
 
 ### Complete API Reference
@@ -367,7 +367,7 @@ await client.publish("sensors/temp", encoder.encode("25.5°C"));
 **QoS 1 (At least once):**
 
 ```javascript
-await client.publish_qos1("sensors/temp", encoder.encode("25.5°C"), (reasonCode) => {
+await client.publishQos1("sensors/temp", encoder.encode("25.5°C"), (reasonCode) => {
   if (reasonCode === 0) {
     console.log("Message acknowledged");
   } else {
@@ -379,7 +379,7 @@ await client.publish_qos1("sensors/temp", encoder.encode("25.5°C"), (reasonCode
 **QoS 2 (Exactly once):**
 
 ```javascript
-await client.publish_qos2("commands/action", encoder.encode("start"), (result) => {
+await client.publishQos2("commands/action", encoder.encode("start"), (result) => {
   if (typeof result === "number") {
     console.log("Success, reason code:", result);
   } else {
@@ -393,7 +393,7 @@ await client.publish_qos2("commands/action", encoder.encode("start"), (result) =
 **With callback (recommended):**
 
 ```javascript
-await client.subscribe_with_callback("sensors/+/data", (topic, payload) => {
+await client.subscribeWithCallback("sensors/+/data", (topic, payload) => {
   const decoder = new TextDecoder();
   console.log(`${topic}: ${decoder.decode(payload)}`);
 });
@@ -417,7 +417,7 @@ await client.unsubscribe("sensors/temp");
 **Connection success:**
 
 ```javascript
-client.on_connect((reasonCode, sessionPresent) => {
+client.onConnect((reasonCode, sessionPresent) => {
   console.log("Connected!");
   console.log("Reason code:", reasonCode);
   console.log("Session present:", sessionPresent);
@@ -427,7 +427,7 @@ client.on_connect((reasonCode, sessionPresent) => {
 **Disconnection:**
 
 ```javascript
-client.on_disconnect(() => {
+client.onDisconnect(() => {
   console.log("Disconnected from broker");
 });
 ```
@@ -435,7 +435,7 @@ client.on_disconnect(() => {
 **Errors (including keepalive timeout):**
 
 ```javascript
-client.on_error((error) => {
+client.onError((error) => {
   console.error("Error:", error);
 });
 ```
@@ -443,7 +443,7 @@ client.on_error((error) => {
 **Check connection status:**
 
 ```javascript
-if (client.is_connected()) {
+if (client.isConnected()) {
   console.log("Currently connected");
 }
 ```
@@ -460,7 +460,7 @@ await client.disconnect();
 
 - Sends PINGREQ every 30 seconds
 - Connection timeout after 90 seconds
-- Triggers `on_error("Keepalive timeout")` and `on_disconnect()` on timeout
+- Triggers `onError("Keepalive timeout")` and `onDisconnect()` on timeout
 
 #### QoS 2 Flow Management
 

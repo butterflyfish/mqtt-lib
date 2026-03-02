@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-wasm 1.0.0] - 2026-03-02
+
+### Changed
+
+- **BREAKING: camelCase JS API** - All exported types, methods, properties, and parameter names now follow JavaScript conventions
+  - Types: `WasmBroker` → `Broker`, `WasmMqttClient` → `MqttClient`, `WasmBrokerConfig` → `BrokerConfig`, etc.
+  - Methods: `connect_with_options` → `connectWithOptions`, `subscribe_with_callback` → `subscribeWithCallback`, etc.
+  - Properties: `config.max_clients` → `config.maxClients`, `config.allow_anonymous` → `config.allowAnonymous`, etc.
+  - See [MIGRATION-1.0.md](crates/mqtt5-wasm/MIGRATION-1.0.md) for the complete rename mapping
+
 ## [mqtt5 0.22.10] / [mqtt5-wasm 0.10.11] / [mqttv5-cli 0.20.7] - 2026-02-28
 
 ### Added
