@@ -2,6 +2,8 @@
 
 This directory contains browser examples demonstrating the mqtt5-wasm library with full client and broker functionality.
 
+> **Upgrading from 0.x?** See the [Migration Guide](../MIGRATION-1.0.md) for the complete list of renamed types, methods, and properties.
+
 ## Use Cases
 
 ### External Broker (websocket/)
@@ -328,17 +330,17 @@ Open http://localhost:8000 in your browser.
 ### Local Broker Features
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+import init, { Broker, MqttClient } from "./pkg/mqtt5_wasm.js";
 
 await init();
 
-const broker = new WasmBroker();
-const client = new WasmMqttClient("local-client");
+const broker = new Broker();
+const client = new MqttClient("local-client");
 
-const port = broker.create_client_port();
-await client.connect_message_port(port);
+const port = broker.createClientPort();
+await client.connectMessagePort(port);
 
-await client.subscribe_with_callback("test/topic", (topic, payload) => {
+await client.subscribeWithCallback("test/topic", (topic, payload) => {
   console.log("Message received:", topic, payload);
 });
 
@@ -357,25 +359,25 @@ The in-tab broker:
 
 ```javascript
 import init, {
-  WasmBroker,
-  WasmBridgeConfig,
-  WasmBridgeDirection,
-  WasmTopicMapping
+  Broker,
+  BridgeConfig,
+  BridgeDirection,
+  TopicMapping
 } from "./pkg/mqtt5_wasm.js";
 
 await init();
 
-const brokerA = new WasmBroker();
-const brokerB = new WasmBroker();
+const brokerA = new Broker();
+const brokerB = new Broker();
 
-const bridgeConfig = new WasmBridgeConfig("a-to-b");
+const bridgeConfig = new BridgeConfig("a-to-b");
 
-const topicMapping = new WasmTopicMapping("sensors/#", WasmBridgeDirection.Both);
+const topicMapping = new TopicMapping("sensors/#", BridgeDirection.Both);
 topicMapping.qos = 1;
-bridgeConfig.add_topic(topicMapping);
+bridgeConfig.addTopic(topicMapping);
 
-const bridgePort = brokerB.create_client_port();
-await brokerA.add_bridge(bridgeConfig, bridgePort);
+const bridgePort = brokerB.createClientPort();
+await brokerA.addBridge(bridgeConfig, bridgePort);
 ```
 
 The broker bridge:
@@ -389,29 +391,29 @@ The broker bridge:
 ### Shared Subscription Features
 
 ```javascript
-import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+import init, { Broker, BrokerConfig, MqttClient } from "./pkg/mqtt5_wasm.js";
 
 await init();
 
-const config = new WasmBrokerConfig();
-config.shared_subscription_available = true;
+const config = new BrokerConfig();
+config.sharedSubscriptionAvailable = true;
 
-const broker = WasmBroker.with_config(config);
+const broker = Broker.withConfig(config);
 
-const worker1 = new WasmMqttClient("worker-1");
-const worker2 = new WasmMqttClient("worker-2");
+const worker1 = new MqttClient("worker-1");
+const worker2 = new MqttClient("worker-2");
 
-const port1 = broker.create_client_port();
-await worker1.connect_message_port(port1);
+const port1 = broker.createClientPort();
+await worker1.connectMessagePort(port1);
 
-const port2 = broker.create_client_port();
-await worker2.connect_message_port(port2);
+const port2 = broker.createClientPort();
+await worker2.connectMessagePort(port2);
 
-await worker1.subscribe_with_callback("$share/workers/tasks/+", (topic, payload) => {
+await worker1.subscribeWithCallback("$share/workers/tasks/+", (topic, payload) => {
   console.log("Worker 1 received:", topic);
 });
 
-await worker2.subscribe_with_callback("$share/workers/tasks/+", (topic, payload) => {
+await worker2.subscribeWithCallback("$share/workers/tasks/+", (topic, payload) => {
   console.log("Worker 2 received:", topic);
 });
 ```
@@ -429,15 +431,15 @@ Shared subscriptions:
 All examples demonstrate the event callback system:
 
 ```javascript
-client.on_connect((reasonCode, sessionPresent) => {
+client.onConnect((reasonCode, sessionPresent) => {
   console.log("Connected!", reasonCode, sessionPresent);
 });
 
-client.on_disconnect(() => {
+client.onDisconnect(() => {
   console.log("Disconnected");
 });
 
-client.on_error((error) => {
+client.onError((error) => {
   console.error("Error:", error);
 });
 ```
@@ -447,7 +449,7 @@ client.on_error((error) => {
 Subscribe with automatic message handling:
 
 ```javascript
-await client.subscribe_with_callback("test/topic", (topic, payload) => {
+await client.subscribeWithCallback("test/topic", (topic, payload) => {
   const decoder = new TextDecoder();
   const message = decoder.decode(payload);
   console.log("Received:", topic, message);
@@ -477,7 +479,7 @@ The client automatically:
 
 - Sends PINGREQ packets every 30 seconds
 - Detects connection timeout after 90 seconds
-- Triggers `on_error` and `on_disconnect` callbacks on timeout
+- Triggers `onError` and `onDisconnect` callbacks on timeout
 
 ## Testing
 
@@ -488,12 +490,12 @@ The client automatically:
 3. Watch for "PINGRESP received" messages every ~30 seconds
 4. Stop the broker or disconnect network
 5. See connection timeout after 90 seconds
-6. Observe `on_error("Keepalive timeout")` and `on_disconnect()` callbacks
+6. Observe `onError("Keepalive timeout")` and `onDisconnect()` callbacks
 
 ### Testing Error Handling
 
 1. Try connecting to an invalid URL
-2. Observe `on_error` callback with connection error
+2. Observe `onError` callback with connection error
 3. Try publishing while disconnected
 4. See JavaScript error alerts
 
@@ -543,7 +545,7 @@ These limitations are inherent to the browser sandbox security model. For produc
 
 **Messages not received:**
 
-- Ensure you used `subscribe_with_callback()`, not `subscribe()`
+- Ensure you used `subscribeWithCallback()`, not `subscribe()`
 - Check browser console for callback errors
 - Verify topic matches (wildcards: `+` for single level, `#` for multi-level)
 

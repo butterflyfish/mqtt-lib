@@ -5,14 +5,14 @@ use wasm_bindgen::prelude::*;
 
 const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "DeflateCodec")]
 pub struct WasmDeflateCodec {
     level: u8,
     min_size: usize,
     max_decompressed_size: usize,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "DeflateCodec")]
 impl WasmDeflateCodec {
     #[wasm_bindgen(constructor)]
     #[must_use]
