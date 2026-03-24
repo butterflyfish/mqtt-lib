@@ -1,3 +1,5 @@
+#![cfg(feature = "transport-websocket")]
+
 //! Property-based tests for WebSocket configuration functionality
 //!
 //! This test suite uses property-based testing to verify the robustness

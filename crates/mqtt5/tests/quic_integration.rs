@@ -1,3 +1,4 @@
+#![cfg(feature = "transport-quic")]
 #![allow(clippy::similar_names)]
 
 use mqtt5::time::Duration;
