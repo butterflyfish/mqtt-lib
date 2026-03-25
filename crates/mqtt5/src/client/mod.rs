@@ -114,6 +114,7 @@ pub struct MqttClient {
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
     pub(crate) tls_config: Arc<RwLock<Option<TlsConfig>>>,
     pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
+    #[cfg(feature = "transport-quic")]
     pub(crate) quic_client_config: Arc<RwLock<Option<quinn::ClientConfig>>>,
 }
 
@@ -759,10 +760,12 @@ impl MqttClient {
         inner.disconnect_with_packet(false).await
     }
 
+    #[cfg(feature = "transport-quic")]
     pub async fn quic_connection(&self) -> Option<Arc<quinn::Connection>> {
         self.inner.read().await.quic_connection.clone()
     }
 
+    #[cfg(feature = "transport-quic")]
     pub async fn was_zero_rtt(&self) -> bool {
         self.inner.read().await.zero_rtt_accepted
     }
@@ -773,7 +776,7 @@ impl MqttClient {
     ///
     /// Returns `NotConnected` if the client is not connected, or `ConnectionError`
     /// if the transport is not QUIC or rebinding fails.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub async fn migrate(&self) -> Result<()> {
         self.inner.read().await.migrate()
     }
@@ -785,7 +788,7 @@ impl MqttClient {
     ///
     /// Returns `NotConnected` if the client is not connected, `ConnectionError`
     /// if the transport is not QUIC, or `Timeout` if the peer does not respond.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub async fn discard_flow(&self, flow_id: crate::transport::flow::FlowId) -> Result<()> {
         self.inner.read().await.discard_flow(flow_id).await
     }
@@ -992,58 +995,67 @@ mod tests {
         assert_eq!(host, "broker.local");
         assert_eq!(port, 9999);
 
-        let (transport, host, port) = MqttClient::parse_address("ws://localhost").unwrap();
-        assert!(matches!(
-            transport,
-            state::ClientTransportType::WebSocket(_)
-        ));
-        assert_eq!(host, "localhost");
-        assert_eq!(port, 80);
+        #[cfg(feature = "transport-websocket")]
+        {
+            let (transport, host, port) = MqttClient::parse_address("ws://localhost").unwrap();
+            assert!(matches!(
+                transport,
+                state::ClientTransportType::WebSocket(_)
+            ));
+            assert_eq!(host, "localhost");
+            assert_eq!(port, 80);
 
-        let (transport, host, port) = MqttClient::parse_address("ws://localhost:8080").unwrap();
-        assert!(matches!(
-            transport,
-            state::ClientTransportType::WebSocket(_)
-        ));
-        assert_eq!(host, "localhost");
-        assert_eq!(port, 8080);
+            let (transport, host, port) = MqttClient::parse_address("ws://localhost:8080").unwrap();
+            assert!(matches!(
+                transport,
+                state::ClientTransportType::WebSocket(_)
+            ));
+            assert_eq!(host, "localhost");
+            assert_eq!(port, 8080);
 
-        let (transport, host, port) = MqttClient::parse_address("wss://secure.broker").unwrap();
-        assert!(matches!(
-            transport,
-            state::ClientTransportType::WebSocketSecure(_)
-        ));
-        assert_eq!(host, "secure.broker");
-        assert_eq!(port, 443);
+            let (transport, host, port) = MqttClient::parse_address("wss://secure.broker").unwrap();
+            assert!(matches!(
+                transport,
+                state::ClientTransportType::WebSocketSecure(_)
+            ));
+            assert_eq!(host, "secure.broker");
+            assert_eq!(port, 443);
 
-        let (transport, host, port) =
-            MqttClient::parse_address("wss://secure.broker:8443").unwrap();
-        assert!(matches!(
-            transport,
-            state::ClientTransportType::WebSocketSecure(_)
-        ));
-        assert_eq!(host, "secure.broker");
-        assert_eq!(port, 8443);
+            let (transport, host, port) =
+                MqttClient::parse_address("wss://secure.broker:8443").unwrap();
+            assert!(matches!(
+                transport,
+                state::ClientTransportType::WebSocketSecure(_)
+            ));
+            assert_eq!(host, "secure.broker");
+            assert_eq!(port, 8443);
 
-        let (transport, host, port) =
-            MqttClient::parse_address("ws://broker.emqx.io:8083/mqtt").unwrap();
-        if let state::ClientTransportType::WebSocket(url) = transport {
-            assert_eq!(url, "ws://broker.emqx.io:8083/mqtt");
-        } else {
-            panic!("Expected WebSocket transport type");
+            let (transport, host, port) =
+                MqttClient::parse_address("ws://broker.emqx.io:8083/mqtt").unwrap();
+            if let state::ClientTransportType::WebSocket(url) = transport {
+                assert_eq!(url, "ws://broker.emqx.io:8083/mqtt");
+            } else {
+                panic!("Expected WebSocket transport type");
+            }
+            assert_eq!(host, "broker.emqx.io");
+            assert_eq!(port, 8083);
+
+            let (transport, host, port) =
+                MqttClient::parse_address("wss://broker.hivemq.com:8884/mqtt").unwrap();
+            if let state::ClientTransportType::WebSocketSecure(url) = transport {
+                assert_eq!(url, "wss://broker.hivemq.com:8884/mqtt");
+            } else {
+                panic!("Expected WebSocketSecure transport type");
+            }
+            assert_eq!(host, "broker.hivemq.com");
+            assert_eq!(port, 8884);
         }
-        assert_eq!(host, "broker.emqx.io");
-        assert_eq!(port, 8083);
 
-        let (transport, host, port) =
-            MqttClient::parse_address("wss://broker.hivemq.com:8884/mqtt").unwrap();
-        if let state::ClientTransportType::WebSocketSecure(url) = transport {
-            assert_eq!(url, "wss://broker.hivemq.com:8884/mqtt");
-        } else {
-            panic!("Expected WebSocketSecure transport type");
+        #[cfg(not(feature = "transport-websocket"))]
+        {
+            assert!(MqttClient::parse_address("ws://localhost").is_err());
+            assert!(MqttClient::parse_address("wss://secure.broker").is_err());
         }
-        assert_eq!(host, "broker.hivemq.com");
-        assert_eq!(port, 8884);
 
         let (transport, host, port) = MqttClient::parse_address("[::1]:1883").unwrap();
         assert!(matches!(transport, state::ClientTransportType::Tcp));

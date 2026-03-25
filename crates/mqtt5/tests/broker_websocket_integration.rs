@@ -1,3 +1,5 @@
+#![cfg(feature = "transport-websocket")]
+
 //! Integration test for broker WebSocket support
 
 use mqtt5::broker::config::{BrokerConfig, WebSocketConfig};

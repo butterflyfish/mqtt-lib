@@ -68,8 +68,6 @@ impl WebSocketServerConfig {
 
     #[must_use]
     pub fn build_ws_config(&self) -> Option<WebSocketConfig> {
-        // For now return None to use default config
-        // TODO: Update when tokio-tungstenite exposes proper config
         None
     }
 }
@@ -131,7 +129,6 @@ where
 {
     debug!("Starting WebSocket handshake with {}", peer_addr);
 
-    // Create callback to handle WebSocket handshake
     let subprotocol = config.subprotocol.clone();
     let path = config.path.clone();
     let allowed_origins = config.allowed_origins.clone();
@@ -152,7 +149,6 @@ where
     }
 }
 
-// Implement AsyncRead and AsyncWrite for WebSocketStreamWrapper
 impl<S> AsyncRead for WebSocketStreamWrapper<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -165,14 +161,12 @@ where
         use std::task::Poll;
         use tokio_tungstenite::tungstenite::Message;
 
-        // If we have buffered data, return it first
         if self.read_pos < self.read_buffer.len() {
             let remaining = &self.read_buffer[self.read_pos..];
             let to_copy = remaining.len().min(buf.remaining());
             buf.put_slice(&remaining[..to_copy]);
             self.read_pos += to_copy;
 
-            // Clear buffer if we've read everything
             if self.read_pos >= self.read_buffer.len() {
                 self.read_buffer.clear();
                 self.read_pos = 0;
@@ -181,15 +175,12 @@ where
             return Poll::Ready(Ok(()));
         }
 
-        // Otherwise, try to read a new message
         let mut inner = std::pin::Pin::new(&mut self.inner);
         match inner.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(Message::Binary(data)))) => {
-                // Store the data in our buffer
                 self.read_buffer = data.to_vec();
                 self.read_pos = 0;
 
-                // Copy what we can to the output buffer
                 let to_copy = self.read_buffer.len().min(buf.remaining());
                 buf.put_slice(&self.read_buffer[..to_copy]);
                 self.read_pos = to_copy;
@@ -363,7 +354,6 @@ mod tests {
         let config = WebSocketServerConfig::default();
         let ws_config = config.build_ws_config();
 
-        // For now, build_ws_config returns None as tokio-tungstenite doesn't expose full config
         assert!(ws_config.is_none());
     }
 }

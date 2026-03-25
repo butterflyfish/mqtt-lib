@@ -1,3 +1,5 @@
+#![cfg(feature = "transport-quic")]
+
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
 use mqtt5::broker::config::{BrokerConfig, QuicConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::MqttBroker;

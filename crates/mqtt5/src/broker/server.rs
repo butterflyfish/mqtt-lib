@@ -6,18 +6,15 @@ use crate::broker::bridge::BridgeManager;
 use crate::broker::client_handler::ClientHandler;
 use crate::broker::config::{BrokerConfig, StorageBackend as StorageBackendType};
 use crate::broker::hot_reload::HotReloadManager;
-use crate::broker::quic_acceptor::{
-    run_quic_cluster_connection_handler, run_quic_connection_handler, QuicAcceptorConfig,
-};
 use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use crate::broker::router::MessageRouter;
 use crate::broker::storage::{DynamicStorage, FileBackend, MemoryBackend, StorageBackend};
 use crate::broker::sys_topics::{BrokerStats, SysTopicsProvider};
 use crate::broker::tls_acceptor::{accept_tls_connection, TlsAcceptorConfig};
 use crate::broker::transport::BrokerTransport;
+#[cfg(feature = "transport-websocket")]
 use crate::broker::websocket_server::{accept_websocket_connection, WebSocketServerConfig};
 use crate::error::{MqttError, Result};
-use quinn::Endpoint;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -25,8 +22,14 @@ use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
+#[cfg(feature = "transport-quic")]
+use crate::broker::quic_acceptor::{
+    run_quic_cluster_connection_handler, run_quic_connection_handler, QuicAcceptorConfig,
+};
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry;
+#[cfg(feature = "transport-quic")]
+use quinn::Endpoint;
 
 #[derive(Clone)]
 struct AcceptLoopState {
@@ -61,14 +64,21 @@ pub struct MqttBroker {
     listeners: Vec<TcpListener>,
     tls_listeners: Vec<TcpListener>,
     tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-websocket")]
     ws_listeners: Vec<TcpListener>,
+    #[cfg(feature = "transport-websocket")]
     ws_config: Option<WebSocketServerConfig>,
+    #[cfg(feature = "transport-websocket")]
     ws_tls_listeners: Vec<TcpListener>,
+    #[cfg(feature = "transport-websocket")]
     ws_tls_config: Option<WebSocketServerConfig>,
+    #[cfg(feature = "transport-websocket")]
     ws_tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-quic")]
     quic_endpoints: Vec<Endpoint>,
     cluster_listeners: Vec<TcpListener>,
     cluster_tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-quic")]
     cluster_quic_endpoints: Vec<Endpoint>,
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
     ready_tx: Option<watch::Sender<bool>>,
@@ -296,12 +306,33 @@ impl MqttBroker {
         bind_result.warn_partial_failures("TCP");
         let listeners = bind_result.successful;
 
+        #[cfg(feature = "transport-websocket")]
         let (ws_listeners, ws_config) = Self::setup_websocket(&config).await?;
+        #[cfg(feature = "transport-websocket")]
         let (ws_tls_listeners, ws_tls_config, ws_tls_acceptor) =
             Self::setup_websocket_tls(&config).await?;
+        #[cfg(not(feature = "transport-websocket"))]
+        if config.websocket_config.is_some() || config.websocket_tls_config.is_some() {
+            return Err(MqttError::Configuration(
+                "broker websocket transport is disabled at compile time; enable the `transport-websocket` feature"
+                    .to_string(),
+            ));
+        }
         let (tls_listeners, tls_acceptor) = Self::setup_tls(&config).await?;
+        #[cfg(feature = "transport-quic")]
         let quic_endpoints = Self::setup_quic(&config).await?;
+        #[cfg(not(feature = "transport-quic"))]
+        if config.quic_config.is_some() {
+            return Err(MqttError::Configuration(
+                "broker quic transport is disabled at compile time; enable the `transport-quic` feature"
+                    .to_string(),
+            ));
+        }
+        #[cfg(feature = "transport-quic")]
         let (cluster_listeners, cluster_tls_acceptor, cluster_quic_endpoints) =
+            Self::setup_cluster_listener(&config).await?;
+        #[cfg(not(feature = "transport-quic"))]
+        let (cluster_listeners, cluster_tls_acceptor) =
             Self::setup_cluster_listener(&config).await?;
 
         let storage = if config.storage_config.enable_persistence {
@@ -325,23 +356,7 @@ impl MqttBroker {
             telemetry::init_tracing_subscriber(otel_config)?;
         }
 
-        let bridge_manager = if config.bridges.is_empty() {
-            None
-        } else {
-            info!("Initializing {} bridge(s)", config.bridges.len());
-
-            let manager = Arc::new(BridgeManager::new(Arc::clone(&router)));
-            router.set_bridge_manager(Arc::clone(&manager)).await;
-
-            for bridge_config in &config.bridges {
-                info!("Adding bridge '{}'", bridge_config.name);
-                if let Err(e) = manager.add_bridge(bridge_config.clone()) {
-                    error!("Failed to add bridge '{}': {}", bridge_config.name, e);
-                }
-            }
-
-            Some(manager)
-        };
+        let bridge_manager = Self::setup_bridges(&config, &router).await;
 
         let config = Arc::new(config);
         let (config_watch_tx, config_watch_rx) = watch::channel(Arc::clone(&config));
@@ -358,14 +373,21 @@ impl MqttBroker {
             listeners,
             tls_listeners,
             tls_acceptor,
+            #[cfg(feature = "transport-websocket")]
             ws_listeners,
+            #[cfg(feature = "transport-websocket")]
             ws_config,
+            #[cfg(feature = "transport-websocket")]
             ws_tls_listeners,
+            #[cfg(feature = "transport-websocket")]
             ws_tls_config,
+            #[cfg(feature = "transport-websocket")]
             ws_tls_acceptor,
+            #[cfg(feature = "transport-quic")]
             quic_endpoints,
             cluster_listeners,
             cluster_tls_acceptor,
+            #[cfg(feature = "transport-quic")]
             cluster_quic_endpoints,
             shutdown_tx: Some(shutdown_tx),
             ready_tx: Some(ready_tx),
@@ -380,6 +402,7 @@ impl MqttBroker {
         })
     }
 
+    #[cfg(feature = "transport-websocket")]
     async fn setup_websocket(
         config: &BrokerConfig,
     ) -> Result<(Vec<TcpListener>, Option<WebSocketServerConfig>)> {
@@ -404,6 +427,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-websocket")]
     async fn setup_websocket_tls(
         config: &BrokerConfig,
     ) -> Result<(
@@ -490,6 +514,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-quic")]
     async fn setup_quic(config: &BrokerConfig) -> Result<Vec<Endpoint>> {
         if let Some(ref quic_config) = config.quic_config {
             let cert_chain =
@@ -534,6 +559,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-quic")]
     async fn setup_cluster_listener(
         config: &BrokerConfig,
     ) -> Result<(Vec<TcpListener>, Option<TlsAcceptor>, Vec<Endpoint>)> {
@@ -620,6 +646,80 @@ impl MqttBroker {
         } else {
             Ok((Vec::new(), None, Vec::new()))
         }
+    }
+
+    #[cfg(not(feature = "transport-quic"))]
+    async fn setup_cluster_listener(
+        config: &BrokerConfig,
+    ) -> Result<(Vec<TcpListener>, Option<TlsAcceptor>)> {
+        if let Some(ref cluster_config) = config.cluster_listener_config {
+            if let Err(e) = cluster_config.validate() {
+                return Err(MqttError::Configuration(e));
+            }
+
+            if cluster_config.is_quic() {
+                return Err(MqttError::Configuration(
+                    "cluster QUIC transport is disabled at compile time; enable the `transport-quic` feature"
+                        .to_string(),
+                ));
+            }
+
+            let bind_result = bind_tcp_addresses(&cluster_config.bind_addresses, "Cluster").await;
+            if bind_result.is_empty() {
+                let error_msg = format_binding_error(
+                    "Cluster",
+                    &bind_result.failures,
+                    &cluster_config.bind_addresses,
+                );
+                warn!("{}, Cluster listener disabled", error_msg);
+                return Ok((Vec::new(), None));
+            }
+            bind_result.warn_partial_failures("Cluster");
+
+            let acceptor = if cluster_config.uses_tls() {
+                let cert_file = cluster_config.cert_file.as_ref().unwrap();
+                let key_file = cluster_config.key_file.as_ref().unwrap();
+
+                let cert_chain = TlsAcceptorConfig::load_cert_chain_from_file(cert_file).await?;
+                let private_key = TlsAcceptorConfig::load_private_key_from_file(key_file).await?;
+
+                let mut acceptor_config = TlsAcceptorConfig::new(cert_chain, private_key);
+
+                if let Some(ref ca_file) = cluster_config.ca_file {
+                    let ca_certs = TlsAcceptorConfig::load_cert_chain_from_file(ca_file).await?;
+                    acceptor_config = acceptor_config.with_client_ca_certs(ca_certs);
+                }
+
+                acceptor_config =
+                    acceptor_config.with_require_client_cert(cluster_config.require_client_cert);
+                Some(acceptor_config.build_acceptor()?)
+            } else {
+                None
+            };
+
+            Ok((bind_result.successful, acceptor))
+        } else {
+            Ok((Vec::new(), None))
+        }
+    }
+
+    async fn setup_bridges(
+        config: &BrokerConfig,
+        router: &Arc<MessageRouter>,
+    ) -> Option<Arc<BridgeManager>> {
+        if config.bridges.is_empty() {
+            return None;
+        }
+        info!("Initializing {} bridge(s)", config.bridges.len());
+        let manager = Arc::new(BridgeManager::new(Arc::clone(router)));
+        router.set_bridge_manager(Arc::clone(&manager)).await;
+        for bridge_config in &config.bridges {
+            info!("Adding bridge '{}'", bridge_config.name);
+            if let Err(e) = manager.add_bridge(bridge_config.clone()) {
+                error!("Failed to add bridge '{}': {}", bridge_config.name, e);
+            }
+        }
+        Some(manager)
     }
 
     fn build_router(
@@ -788,6 +888,7 @@ impl MqttBroker {
         }));
     }
 
+    #[cfg(feature = "transport-websocket")]
     fn spawn_ws_accept_tasks(
         ws_listeners: Vec<TcpListener>,
         ws_config: Option<WebSocketServerConfig>,
@@ -862,6 +963,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-websocket")]
     fn spawn_wss_accept_tasks(
         ws_tls_listeners: Vec<TcpListener>,
         ws_tls_config: Option<WebSocketServerConfig>,
@@ -1027,6 +1129,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-quic")]
     fn spawn_quic_accept_tasks(
         quic_endpoints: Vec<Endpoint>,
         state: &AcceptLoopState,
@@ -1211,6 +1314,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-quic")]
     fn spawn_cluster_quic_accept_tasks(
         cluster_quic_endpoints: Vec<Endpoint>,
         state: &AcceptLoopState,
@@ -1462,6 +1566,7 @@ impl MqttBroker {
     /// # Errors
     ///
     /// Returns an error if the accept loop fails
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting MQTT broker");
 
@@ -1474,14 +1579,21 @@ impl MqttBroker {
         let listeners = std::mem::take(&mut self.listeners);
         let tls_listeners = std::mem::take(&mut self.tls_listeners);
         let tls_acceptor = self.tls_acceptor.take();
+        #[cfg(feature = "transport-websocket")]
         let ws_listeners = std::mem::take(&mut self.ws_listeners);
+        #[cfg(feature = "transport-websocket")]
         let ws_config = self.ws_config.take();
+        #[cfg(feature = "transport-websocket")]
         let ws_tls_listeners = std::mem::take(&mut self.ws_tls_listeners);
+        #[cfg(feature = "transport-websocket")]
         let ws_tls_config = self.ws_tls_config.take();
+        #[cfg(feature = "transport-websocket")]
         let ws_tls_acceptor = self.ws_tls_acceptor.take();
+        #[cfg(feature = "transport-quic")]
         let quic_endpoints = std::mem::take(&mut self.quic_endpoints);
         let cluster_listeners = std::mem::take(&mut self.cluster_listeners);
         let cluster_tls_acceptor = self.cluster_tls_acceptor.take();
+        #[cfg(feature = "transport-quic")]
         let cluster_quic_endpoints = std::mem::take(&mut self.cluster_quic_endpoints);
 
         let Some(shutdown_tx) = self.shutdown_tx.take() else {
@@ -1520,7 +1632,22 @@ impl MqttBroker {
             shutdown_tx: shutdown_tx.clone(),
         };
 
+        Self::spawn_tcp_accept_tasks(listeners, &accept_state, &mut task_handles);
+        Self::spawn_tls_accept_tasks(
+            tls_listeners,
+            tls_acceptor,
+            &accept_state,
+            &mut task_handles,
+        );
+        Self::spawn_cluster_accept_tasks(
+            cluster_listeners,
+            cluster_tls_acceptor,
+            &accept_state,
+            &mut task_handles,
+        );
+        #[cfg(feature = "transport-websocket")]
         Self::spawn_ws_accept_tasks(ws_listeners, ws_config, &accept_state, &mut task_handles);
+        #[cfg(feature = "transport-websocket")]
         Self::spawn_wss_accept_tasks(
             ws_tls_listeners,
             ws_tls_config,
@@ -1528,25 +1655,14 @@ impl MqttBroker {
             &accept_state,
             &mut task_handles,
         );
-        Self::spawn_tls_accept_tasks(
-            tls_listeners,
-            tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
+        #[cfg(feature = "transport-quic")]
         Self::spawn_quic_accept_tasks(quic_endpoints, &accept_state, &mut task_handles);
-        Self::spawn_cluster_accept_tasks(
-            cluster_listeners,
-            cluster_tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
+        #[cfg(feature = "transport-quic")]
         Self::spawn_cluster_quic_accept_tasks(
             cluster_quic_endpoints,
             &accept_state,
             &mut task_handles,
         );
-        Self::spawn_tcp_accept_tasks(listeners, &accept_state, &mut task_handles);
 
         Self::spawn_hot_reload_task(
             self.hot_reload_manager.take(),
@@ -1632,6 +1748,7 @@ impl MqttBroker {
         self.listeners.first()?.local_addr().ok()
     }
 
+    #[cfg(feature = "transport-websocket")]
     #[must_use]
     pub fn ws_local_addr(&self) -> Option<std::net::SocketAddr> {
         self.ws_listeners.first()?.local_addr().ok()

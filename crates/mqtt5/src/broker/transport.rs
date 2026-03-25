@@ -1,8 +1,3 @@
-//! Unified transport wrapper for broker connections
-//!
-//! This module provides a unified interface for different transport types
-//! (TCP, TLS, WebSocket) used by the broker's client handler.
-
 use crate::error::Result;
 use crate::Transport;
 use std::fmt::Debug;
@@ -12,22 +7,23 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
+#[cfg(feature = "transport-quic")]
 use super::quic_acceptor::QuicStreamWrapper;
 use super::tls_acceptor::TlsStreamWrapper;
+#[cfg(feature = "transport-websocket")]
 use super::websocket_server::WebSocketStreamWrapper;
 
-/// Trait for streams that can be used as WebSocket transport
+#[cfg(feature = "transport-websocket")]
 pub trait WebSocketTransport:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin
 {
-    /// Gets the peer address (if available).
-    ///
     /// # Errors
-    /// Returns an error if the peer address is not available for this transport type.
+    ///
+    /// Returns an error if the peer address cannot be determined.
     fn peer_addr(&self) -> Result<SocketAddr>;
 }
 
-/// Blanket implementation for all types that implement the required traits
+#[cfg(feature = "transport-websocket")]
 impl<S> WebSocketTransport for WebSocketStreamWrapper<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
@@ -39,30 +35,25 @@ where
     }
 }
 
-/// Unified transport enum for different connection types
 pub enum BrokerTransport {
-    /// Plain TCP connection
     Tcp(TcpStream),
-    /// TLS-encrypted connection
     Tls(Box<TlsStreamWrapper>),
-    /// WebSocket connection (can be over TCP or TLS)
+    #[cfg(feature = "transport-websocket")]
     WebSocket(Box<dyn WebSocketTransport>),
-    /// QUIC connection
+    #[cfg(feature = "transport-quic")]
     Quic(Box<QuicStreamWrapper>),
 }
 
 impl BrokerTransport {
-    /// Creates a new TCP transport
     pub fn tcp(stream: TcpStream) -> Self {
         Self::Tcp(stream)
     }
 
-    /// Creates a new TLS transport
     pub fn tls(stream: TlsStreamWrapper) -> Self {
         Self::Tls(Box::new(stream))
     }
 
-    /// Creates a new WebSocket transport
+    #[cfg(feature = "transport-websocket")]
     pub fn websocket<S>(stream: WebSocketStreamWrapper<S>) -> Self
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin + 'static,
@@ -70,40 +61,48 @@ impl BrokerTransport {
         Self::WebSocket(Box::new(stream))
     }
 
+    #[cfg(feature = "transport-quic")]
     #[must_use]
     pub fn quic(stream: QuicStreamWrapper) -> Self {
         Self::Quic(Box::new(stream))
     }
 
-    /// Gets the peer address.
-    ///
     /// # Errors
-    /// Returns an error if the peer address cannot be retrieved from the underlying transport.
+    ///
+    /// Returns an error if the peer address cannot be determined.
     pub fn peer_addr(&self) -> Result<SocketAddr> {
         match self {
             Self::Tcp(stream) => Ok(stream.peer_addr()?),
             Self::Tls(stream) => stream.peer_addr(),
+            #[cfg(feature = "transport-websocket")]
             Self::WebSocket(stream) => stream.peer_addr(),
+            #[cfg(feature = "transport-quic")]
             Self::Quic(stream) => Ok(stream.peer_addr()),
         }
     }
 
-    /// Gets the transport type as a string for logging
     pub fn transport_type(&self) -> &'static str {
         match self {
             Self::Tcp(_) => "TCP",
             Self::Tls(_) => "TLS",
+            #[cfg(feature = "transport-websocket")]
             Self::WebSocket(_) => "WebSocket",
+            #[cfg(feature = "transport-quic")]
             Self::Quic(_) => "QUIC",
         }
     }
 
-    /// Checks if this is a secure connection
     pub fn is_secure(&self) -> bool {
-        matches!(self, Self::Tls(_) | Self::Quic(_))
+        match self {
+            Self::Tls(_) => true,
+            #[cfg(feature = "transport-quic")]
+            Self::Quic(_) => true,
+            Self::Tcp(_) => false,
+            #[cfg(feature = "transport-websocket")]
+            Self::WebSocket(_) => false,
+        }
     }
 
-    /// Gets client certificate info if available (for TLS connections)
     pub fn client_cert_info(&self) -> Option<String> {
         match self {
             Self::Tls(stream) => {
@@ -113,7 +112,11 @@ impl BrokerTransport {
                     None
                 }
             }
-            Self::Tcp(_) | Self::WebSocket(_) | Self::Quic(_) => None,
+            Self::Tcp(_) => None,
+            #[cfg(feature = "transport-websocket")]
+            Self::WebSocket(_) => None,
+            #[cfg(feature = "transport-quic")]
+            Self::Quic(_) => None,
         }
     }
 }
@@ -123,7 +126,9 @@ impl Debug for BrokerTransport {
         match self {
             Self::Tcp(_) => write!(f, "BrokerTransport::Tcp"),
             Self::Tls(_) => write!(f, "BrokerTransport::Tls"),
+            #[cfg(feature = "transport-websocket")]
             Self::WebSocket(_) => write!(f, "BrokerTransport::WebSocket"),
+            #[cfg(feature = "transport-quic")]
             Self::Quic(_) => write!(f, "BrokerTransport::Quic"),
         }
     }
@@ -138,7 +143,9 @@ impl AsyncRead for BrokerTransport {
         match self.get_mut() {
             Self::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "transport-websocket")]
             Self::WebSocket(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "transport-quic")]
             Self::Quic(stream) => Pin::new(stream).poll_read(cx, buf),
         }
     }
@@ -153,7 +160,9 @@ impl AsyncWrite for BrokerTransport {
         match self.get_mut() {
             Self::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "transport-websocket")]
             Self::WebSocket(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "transport-quic")]
             Self::Quic(stream) => Pin::new(stream).poll_write(cx, buf),
         }
     }
@@ -162,7 +171,9 @@ impl AsyncWrite for BrokerTransport {
         match self.get_mut() {
             Self::Tcp(stream) => Pin::new(stream).poll_flush(cx),
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "transport-websocket")]
             Self::WebSocket(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "transport-quic")]
             Self::Quic(stream) => Pin::new(stream).poll_flush(cx),
         }
     }
@@ -171,16 +182,16 @@ impl AsyncWrite for BrokerTransport {
         match self.get_mut() {
             Self::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "transport-websocket")]
             Self::WebSocket(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "transport-quic")]
             Self::Quic(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
 
-// Implement the Transport trait for BrokerTransport
 impl Transport for BrokerTransport {
     async fn connect(&mut self) -> Result<()> {
-        // Server-side transports are already connected
         Ok(())
     }
 
@@ -203,8 +214,5 @@ impl Transport for BrokerTransport {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_transport_type() {
-        // We can't test with actual streams in unit tests
-        // This would be better as an integration test
-    }
+    fn test_transport_type() {}
 }

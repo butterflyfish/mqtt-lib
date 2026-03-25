@@ -31,33 +31,50 @@ use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::subscription::Subscription;
 use crate::session::SessionState;
-use crate::transport::flow::{FlowFlags, FlowId};
-use crate::transport::{PacketIo, PacketWriter, QuicStreamManager, StreamStrategy, TransportType};
+use crate::transport::{PacketIo, PacketWriter, TransportType};
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
-use quinn::{Connection, Endpoint};
 
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
+#[cfg(feature = "transport-quic")]
+use crate::transport::flow::{FlowFlags, FlowId};
+#[cfg(feature = "transport-quic")]
+use crate::transport::QuicStreamManager;
+#[cfg(feature = "transport-quic")]
+use crate::transport::StreamStrategy;
+#[cfg(feature = "transport-quic")]
+use quinn::{Connection, Endpoint};
 
 pub use unified::{UnifiedReader, UnifiedWriter};
 
-use keepalive::{flow_expiration_task, keepalive_task_with_writer, KeepaliveState};
-use reader::{packet_reader_task_with_responses, quic_stream_acceptor_task, PacketReaderContext};
+#[cfg(feature = "transport-quic")]
+use keepalive::flow_expiration_task;
+use keepalive::{keepalive_task_with_writer, KeepaliveState};
+#[cfg(feature = "transport-quic")]
+use reader::quic_stream_acceptor_task;
+use reader::{packet_reader_task_with_responses, PacketReaderContext};
 
 pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
+    #[cfg(feature = "transport-quic")]
     pub quic_connection: Option<Arc<Connection>>,
+    #[cfg(feature = "transport-quic")]
     pub quic_endpoint: Option<Endpoint>,
+    #[cfg(feature = "transport-quic")]
     pub stream_strategy: Option<StreamStrategy>,
+    #[cfg(feature = "transport-quic")]
     pub quic_datagrams_enabled: bool,
+    #[cfg(feature = "transport-quic")]
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub connected: Arc<AtomicBool>,
     pub callback_manager: Arc<CallbackManager>,
     pub packet_reader_handle: Option<JoinHandle<()>>,
     pub keepalive_handle: Option<JoinHandle<()>>,
+    #[cfg(feature = "transport-quic")]
     pub quic_stream_acceptor_handle: Option<JoinHandle<()>>,
+    #[cfg(feature = "transport-quic")]
     pub flow_expiration_handle: Option<JoinHandle<()>>,
     pub options: ConnectOptions,
     pub packet_id_generator: PacketIdGenerator,
@@ -75,7 +92,9 @@ pub struct DirectClientInner {
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
     pub auth_method: Option<String>,
     pub keepalive_state: Arc<Mutex<KeepaliveState>>,
+    #[cfg(feature = "transport-quic")]
     pub cached_quic_client_config: Option<quinn::ClientConfig>,
+    #[cfg(feature = "transport-quic")]
     pub zero_rtt_accepted: bool,
 }
 
@@ -92,17 +111,24 @@ impl DirectClientInner {
 
         Self {
             writer: None,
+            #[cfg(feature = "transport-quic")]
             quic_connection: None,
+            #[cfg(feature = "transport-quic")]
             quic_endpoint: None,
+            #[cfg(feature = "transport-quic")]
             stream_strategy: None,
+            #[cfg(feature = "transport-quic")]
             quic_datagrams_enabled: false,
+            #[cfg(feature = "transport-quic")]
             quic_stream_manager: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
             callback_manager: Arc::new(CallbackManager::new()),
             packet_reader_handle: None,
             keepalive_handle: None,
+            #[cfg(feature = "transport-quic")]
             quic_stream_acceptor_handle: None,
+            #[cfg(feature = "transport-quic")]
             flow_expiration_handle: None,
             options,
             packet_id_generator: PacketIdGenerator::new(),
@@ -120,7 +146,9 @@ impl DirectClientInner {
             auth_handler: None,
             auth_method,
             keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
+            #[cfg(feature = "transport-quic")]
             cached_quic_client_config: None,
+            #[cfg(feature = "transport-quic")]
             zero_rtt_accepted: false,
         }
     }
@@ -287,6 +315,7 @@ impl DirectClientInner {
                     UnifiedWriter::Tls(w),
                 )
             }
+            #[cfg(feature = "transport-websocket")]
             TransportType::WebSocket(ws) => {
                 let (r, w) = (*ws).into_split()?;
                 (
@@ -294,6 +323,7 @@ impl DirectClientInner {
                     UnifiedWriter::WebSocket(w),
                 )
             }
+            #[cfg(feature = "transport-quic")]
             TransportType::Quic(quic) => {
                 let split = (*quic).into_split()?;
                 let conn_arc = Arc::new(split.connection);
@@ -404,18 +434,21 @@ impl DirectClientInner {
 
         self.stop_background_tasks();
 
+        #[cfg(feature = "transport-quic")]
         if let Some(manager) = self.quic_stream_manager.take() {
             manager.close_all_streams().await;
         }
 
         self.set_connected(false);
         self.writer = None;
+        #[cfg(feature = "transport-quic")]
         if let Some(conn) = self.quic_connection.take() {
             conn.close(
                 quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::NoError.code()),
                 b"disconnect",
             );
         }
+        #[cfg(feature = "transport-quic")]
         if let Some(endpoint) = self.quic_endpoint.take() {
             tokio::spawn(async move {
                 let _ =
@@ -423,8 +456,11 @@ impl DirectClientInner {
                         .await;
             });
         }
-        self.stream_strategy = None;
-        self.quic_datagrams_enabled = false;
+        #[cfg(feature = "transport-quic")]
+        {
+            self.stream_strategy = None;
+            self.quic_datagrams_enabled = false;
+        }
 
         Ok(())
     }
@@ -648,54 +684,63 @@ impl DirectClientInner {
     }
 
     async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
-        if qos == QoS::AtMostOnce && self.datagrams_available() {
-            if let Some(max_size) = self.max_datagram_size() {
-                let overhead = 5 + publish.topic_name.len();
-                if publish.payload.len() + overhead <= max_size {
-                    let mut buf = bytes::BytesMut::new();
-                    crate::transport::packet_io::encode_packet_to_buffer(
-                        &Packet::Publish(publish.clone()),
-                        &mut buf,
-                    )?;
-                    if buf.len() <= max_size && self.send_datagram(buf.freeze()).is_ok() {
-                        tracing::debug!(
-                            topic = %publish.topic_name,
-                            payload_len = publish.payload.len(),
-                            "Sent QoS 0 PUBLISH via QUIC datagram"
-                        );
-                        return Ok(());
+        #[cfg(not(feature = "transport-quic"))]
+        let _ = qos;
+
+        #[cfg(feature = "transport-quic")]
+        {
+            if qos == QoS::AtMostOnce && self.datagrams_available() {
+                if let Some(max_size) = self.max_datagram_size() {
+                    let overhead = 5 + publish.topic_name.len();
+                    if publish.payload.len() + overhead <= max_size {
+                        let mut buf = bytes::BytesMut::new();
+                        crate::transport::packet_io::encode_packet_to_buffer(
+                            &Packet::Publish(publish.clone()),
+                            &mut buf,
+                        )?;
+                        if buf.len() <= max_size && self.send_datagram(buf.freeze()).is_ok() {
+                            tracing::debug!(
+                                topic = %publish.topic_name,
+                                payload_len = publish.payload.len(),
+                                "Sent QoS 0 PUBLISH via QUIC datagram"
+                            );
+                            return Ok(());
+                        }
                     }
                 }
             }
-        }
 
-        if let Some(manager) = &self.quic_stream_manager {
-            match manager.strategy() {
-                StreamStrategy::DataPerPublish => {
-                    tracing::debug!(
-                        topic = %publish.topic_name,
-                        qos = ?qos,
-                        "Using dedicated QUIC stream for PUBLISH (DataPerPublish)"
-                    );
-                    manager
-                        .send_packet_on_stream(Packet::Publish(publish))
-                        .await?;
-                    return Ok(());
+            if let Some(manager) = &self.quic_stream_manager {
+                match manager.strategy() {
+                    StreamStrategy::DataPerPublish => {
+                        tracing::debug!(
+                            topic = %publish.topic_name,
+                            qos = ?qos,
+                            "Using dedicated QUIC stream for PUBLISH (DataPerPublish)"
+                        );
+                        manager
+                            .send_packet_on_stream(Packet::Publish(publish))
+                            .await?;
+                        return Ok(());
+                    }
+                    #[allow(deprecated)]
+                    StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription => {
+                        tracing::debug!(
+                            topic = %publish.topic_name,
+                            qos = ?qos,
+                            strategy = ?manager.strategy(),
+                            "Using topic-specific QUIC stream for PUBLISH"
+                        );
+                        manager
+                            .send_on_topic_stream(
+                                publish.topic_name.clone(),
+                                Packet::Publish(publish),
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                    StreamStrategy::ControlOnly => {}
                 }
-                #[allow(deprecated)]
-                StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription => {
-                    tracing::debug!(
-                        topic = %publish.topic_name,
-                        qos = ?qos,
-                        strategy = ?manager.strategy(),
-                        "Using topic-specific QUIC stream for PUBLISH"
-                    );
-                    manager
-                        .send_on_topic_stream(publish.topic_name.clone(), Packet::Publish(publish))
-                        .await?;
-                    return Ok(());
-                }
-                StreamStrategy::ControlOnly => {}
             }
         }
 
@@ -708,6 +753,7 @@ impl DirectClientInner {
         Ok(())
     }
 
+    #[cfg(feature = "transport-quic")]
     fn datagrams_available(&self) -> bool {
         self.quic_datagrams_enabled
             && self
@@ -717,6 +763,7 @@ impl DirectClientInner {
                 .is_some()
     }
 
+    #[cfg(feature = "transport-quic")]
     fn max_datagram_size(&self) -> Option<usize> {
         if !self.quic_datagrams_enabled {
             return None;
@@ -726,6 +773,7 @@ impl DirectClientInner {
             .and_then(|c| c.max_datagram_size())
     }
 
+    #[cfg(feature = "transport-quic")]
     fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
         let conn = self
             .quic_connection
@@ -1017,6 +1065,7 @@ impl DirectClientInner {
             pubcomp_channels,
             writer: writer_for_reader,
             connected,
+            #[cfg(feature = "transport-quic")]
             protocol_version: self.options.protocol_version.as_u8(),
             auth_handler: self.auth_handler.clone(),
             auth_method: self.auth_method.clone(),
@@ -1052,6 +1101,7 @@ impl DirectClientInner {
             }));
         }
 
+        #[cfg(feature = "transport-quic")]
         if let Some(conn) = &self.quic_connection {
             let connection = conn.clone();
             let ctx_for_streams = ctx.clone();
@@ -1074,10 +1124,12 @@ impl DirectClientInner {
         Ok(())
     }
 
+    #[cfg(feature = "transport-quic")]
     async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
         self.session.read().await.get_recoverable_flows().await
     }
 
+    #[cfg(feature = "transport-quic")]
     pub(crate) async fn recover_flows(&self) -> Result<usize> {
         let Some(manager) = &self.quic_stream_manager else {
             return Ok(0);
@@ -1113,6 +1165,13 @@ impl DirectClientInner {
         Ok(recovered)
     }
 
+    #[cfg(not(feature = "transport-quic"))]
+    #[allow(clippy::unused_async)]
+    pub(crate) async fn recover_flows(&self) -> crate::error::Result<usize> {
+        Ok(0)
+    }
+
+    #[cfg(feature = "transport-quic")]
     pub async fn discard_flow(&self, flow_id: FlowId) -> Result<()> {
         if !self.is_connected() {
             return Err(MqttError::NotConnected);
@@ -1123,6 +1182,7 @@ impl DirectClientInner {
         manager.discard_flow(flow_id).await
     }
 
+    #[cfg(feature = "transport-quic")]
     pub fn migrate(&self) -> Result<()> {
         if !self.is_connected() {
             return Err(MqttError::NotConnected);
@@ -1149,9 +1209,11 @@ impl DirectClientInner {
         if let Some(handle) = self.keepalive_handle.take() {
             handle.abort();
         }
+        #[cfg(feature = "transport-quic")]
         if let Some(handle) = self.quic_stream_acceptor_handle.take() {
             handle.abort();
         }
+        #[cfg(feature = "transport-quic")]
         if let Some(handle) = self.flow_expiration_handle.take() {
             handle.abort();
         }

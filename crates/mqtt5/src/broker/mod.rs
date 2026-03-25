@@ -34,13 +34,13 @@ pub mod config;
 pub mod events;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod hot_reload;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 pub mod quic_acceptor;
 pub mod resource_monitor;
 pub mod router;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 mod server_stream_manager;
 pub mod storage;
 pub mod sys_topics;
@@ -48,7 +48,7 @@ pub mod sys_topics;
 pub mod tls_acceptor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod transport;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-websocket"))]
 pub mod websocket_server;
 
 pub use acl::{AclManager, AclRule, Permission, Role, RoleRule};
