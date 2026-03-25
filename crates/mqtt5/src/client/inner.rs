@@ -48,18 +48,40 @@ impl MqttClient {
             Ok((ClientTransportType::Tls, host, port))
         } else if let Some(rest) = address.strip_prefix("ws://") {
             let (host, port) = Self::split_host_port(rest, 80)?;
-            Ok((
-                ClientTransportType::WebSocket(address.to_string()),
-                host,
-                port,
-            ))
+            #[cfg(feature = "transport-websocket")]
+            {
+                Ok((
+                    ClientTransportType::WebSocket(address.to_string()),
+                    host,
+                    port,
+                ))
+            }
+            #[cfg(not(feature = "transport-websocket"))]
+            {
+                let _ = (host, port);
+                Err(Self::unsupported_transport_feature(
+                    "WebSocket",
+                    "transport-websocket",
+                ))
+            }
         } else if let Some(rest) = address.strip_prefix("wss://") {
             let (host, port) = Self::split_host_port(rest, 443)?;
-            Ok((
-                ClientTransportType::WebSocketSecure(address.to_string()),
-                host,
-                port,
-            ))
+            #[cfg(feature = "transport-websocket")]
+            {
+                Ok((
+                    ClientTransportType::WebSocketSecure(address.to_string()),
+                    host,
+                    port,
+                ))
+            }
+            #[cfg(not(feature = "transport-websocket"))]
+            {
+                let _ = (host, port);
+                Err(Self::unsupported_transport_feature(
+                    "WebSocket",
+                    "transport-websocket",
+                ))
+            }
         } else if let Some(rest) = address.strip_prefix("tcp://") {
             let (host, port) = Self::split_host_port(rest, 1883)?;
             Ok((ClientTransportType::Tcp, host, port))
@@ -68,10 +90,32 @@ impl MqttClient {
             Ok((ClientTransportType::Tls, host, port))
         } else if let Some(rest) = address.strip_prefix("quic://") {
             let (host, port) = Self::split_host_port(rest, 14567)?;
-            Ok((ClientTransportType::Quic, host, port))
+            #[cfg(feature = "transport-quic")]
+            {
+                Ok((ClientTransportType::Quic, host, port))
+            }
+            #[cfg(not(feature = "transport-quic"))]
+            {
+                let _ = (host, port);
+                Err(Self::unsupported_transport_feature(
+                    "QUIC",
+                    "transport-quic",
+                ))
+            }
         } else if let Some(rest) = address.strip_prefix("quics://") {
             let (host, port) = Self::split_host_port(rest, 14567)?;
-            Ok((ClientTransportType::QuicSecure, host, port))
+            #[cfg(feature = "transport-quic")]
+            {
+                Ok((ClientTransportType::QuicSecure, host, port))
+            }
+            #[cfg(not(feature = "transport-quic"))]
+            {
+                let _ = (host, port);
+                Err(Self::unsupported_transport_feature(
+                    "QUIC",
+                    "transport-quic",
+                ))
+            }
         } else {
             let (host, port) = Self::split_host_port(address, 1883)?;
             Ok((ClientTransportType::Tcp, host, port))
@@ -144,11 +188,15 @@ impl MqttClient {
         match client_transport_type {
             ClientTransportType::Tcp => Self::connect_tcp(addr).await,
             ClientTransportType::Tls => self.connect_tls(addr, host).await,
+            #[cfg(feature = "transport-websocket")]
             ClientTransportType::WebSocket(url) => Self::connect_websocket(&url).await,
+            #[cfg(feature = "transport-websocket")]
             ClientTransportType::WebSocketSecure(url) => {
                 self.connect_websocket_secure(addr, host, &url).await
             }
+            #[cfg(feature = "transport-quic")]
             ClientTransportType::Quic => self.connect_quic(addr, host).await,
+            #[cfg(feature = "transport-quic")]
             ClientTransportType::QuicSecure => self.connect_quic_secure(addr, host).await,
         }
     }
@@ -204,14 +252,6 @@ impl MqttClient {
         Ok(TransportType::WebSocket(Box::new(ws_transport)))
     }
 
-    #[cfg(not(feature = "transport-websocket"))]
-    async fn connect_websocket(_url: &str) -> Result<TransportType> {
-        Err(Self::unsupported_transport_feature(
-            "websocket",
-            "transport-websocket",
-        ))
-    }
-
     #[cfg(feature = "transport-websocket")]
     async fn connect_websocket_secure(
         &self,
@@ -234,19 +274,6 @@ impl MqttClient {
             .await
             .map_err(|e| MqttError::ConnectionError(format!("WebSocket connect failed: {e}")))?;
         Ok(TransportType::WebSocket(Box::new(ws_transport)))
-    }
-
-    #[cfg(not(feature = "transport-websocket"))]
-    async fn connect_websocket_secure(
-        &self,
-        _addr: std::net::SocketAddr,
-        _host: &str,
-        _url: &str,
-    ) -> Result<TransportType> {
-        Err(Self::unsupported_transport_feature(
-            "websocket",
-            "transport-websocket",
-        ))
     }
 
     #[cfg(feature = "transport-quic")]
@@ -280,18 +307,6 @@ impl MqttClient {
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
         Ok(TransportType::Quic(Box::new(quic_transport)))
-    }
-
-    #[cfg(not(feature = "transport-quic"))]
-    async fn connect_quic(
-        &self,
-        _addr: std::net::SocketAddr,
-        _host: &str,
-    ) -> Result<TransportType> {
-        Err(Self::unsupported_transport_feature(
-            "quic",
-            "transport-quic",
-        ))
     }
 
     #[cfg(feature = "transport-quic")]
@@ -355,18 +370,6 @@ impl MqttClient {
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
         Ok(TransportType::Quic(Box::new(quic_transport)))
-    }
-
-    #[cfg(not(feature = "transport-quic"))]
-    async fn connect_quic_secure(
-        &self,
-        _addr: std::net::SocketAddr,
-        _host: &str,
-    ) -> Result<TransportType> {
-        Err(Self::unsupported_transport_feature(
-            "quic",
-            "transport-quic",
-        ))
     }
 
     pub(crate) async fn try_connect_to_addresses(

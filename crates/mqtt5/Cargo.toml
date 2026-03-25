@@ -36,7 +36,7 @@ opentelemetry_sdk = ["dep:opentelemetry_sdk"]
 opentelemetry-otlp = ["dep:opentelemetry-otlp"]
 tracing-opentelemetry = ["dep:tracing-opentelemetry"]
 tokio = ["dep:tokio"]
-transport-websocket = ["dep:tokio-tungstenite"]
+transport-websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
 transport-quic = ["dep:quinn"]
 codec-gzip = ["dep:flate2"]
 codec-deflate = ["dep:flate2"]
@@ -102,7 +102,7 @@ wasm-opt = ["-O0"]
 base64 = "0.22"
 bytes = "1.10"
 futures = "0.3"
-futures-util = "0.3"
+futures-util = { version = "0.3", optional = true }
 hex = "0.4"
 rand = "0.9"
 serde = { version = "1.0", features = ["derive"] }

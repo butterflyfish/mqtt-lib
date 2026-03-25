@@ -617,7 +617,10 @@ impl ClientHandler {
     }
 
     #[cfg(any(target_arch = "wasm32", not(feature = "transport-quic")))]
-    async fn check_quic_migration(&mut self) {}
+    fn check_quic_migration(&mut self) -> impl std::future::Future<Output = ()> {
+        let _ = &self;
+        std::future::ready(())
+    }
 
     async fn handle_packet(&mut self, packet: Packet) -> Result<()> {
         match packet {
