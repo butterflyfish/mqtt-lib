@@ -112,6 +112,126 @@ async fn test_automatic_reconnection() {
 }
 
 #[tokio::test]
+async fn test_client_initiated_disconnect_stops_automatic_reconnection() {
+    let broker = TestBroker::start().await;
+
+    let client_id = test_client_id("disconnect-stops-reconnect");
+    let opts = ConnectOptions::new(client_id)
+        .with_clean_start(false)
+        .with_keep_alive(Duration::from_secs(2))
+        .with_reconnect_delay(Duration::from_millis(100), Duration::from_secs(1));
+    let client = MqttClient::with_options(opts);
+
+    let connected_count = Arc::new(AtomicU32::new(0));
+    let disconnected_count = Arc::new(AtomicU32::new(0));
+    let reconnecting_count = Arc::new(AtomicU32::new(0));
+
+    let connected_clone = Arc::clone(&connected_count);
+    let disconnected_clone = Arc::clone(&disconnected_count);
+    let reconnecting_clone = Arc::clone(&reconnecting_count);
+
+    client
+        .on_connection_event(move |event| match event {
+            ConnectionEvent::Connected { .. } => {
+                connected_clone.fetch_add(1, Ordering::SeqCst);
+            }
+            ConnectionEvent::Disconnected { .. } => {
+                disconnected_clone.fetch_add(1, Ordering::SeqCst);
+            }
+            ConnectionEvent::Reconnecting { .. } => {
+                reconnecting_clone.fetch_add(1, Ordering::SeqCst);
+            }
+            ConnectionEvent::Connecting | ConnectionEvent::ReconnectFailed { .. } => {}
+        })
+        .await
+        .expect("Failed to register connection event handler");
+
+    client
+        .connect(broker.address())
+        .await
+        .expect("Failed to connect");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(connected_count.load(Ordering::SeqCst), 1);
+
+    client.disconnect().await.expect("Failed to disconnect");
+
+    // Wait longer than the monitor tick to ensure the old client does not revive
+    // itself after a caller-initiated disconnect.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    assert_eq!(disconnected_count.load(Ordering::SeqCst), 1);
+    assert_eq!(reconnecting_count.load(Ordering::SeqCst), 0);
+    assert_eq!(connected_count.load(Ordering::SeqCst), 1);
+    assert!(!client.is_connected().await);
+
+    // An explicit connect should still create a new lifecycle on the same client.
+    client
+        .connect(broker.address())
+        .await
+        .expect("Failed to reconnect explicitly");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(connected_count.load(Ordering::SeqCst), 2);
+
+    client.disconnect().await.expect("Failed to disconnect");
+}
+
+#[tokio::test]
+async fn test_disconnect_during_inflight_reconnection() {
+    let reconnecting_count = Arc::new(AtomicU32::new(0));
+    let connected_count = Arc::new(AtomicU32::new(0));
+
+    let reconnecting_clone = Arc::clone(&reconnecting_count);
+    let connected_clone = Arc::clone(&connected_count);
+
+    let client_id = test_client_id("disconnect-inflight");
+    let opts = ConnectOptions::new(client_id)
+        .with_clean_start(true)
+        .with_reconnect_delay(Duration::from_millis(200), Duration::from_secs(1));
+    let client = MqttClient::with_options(opts);
+
+    client
+        .on_connection_event(move |event| match event {
+            ConnectionEvent::Connected { .. } => {
+                connected_clone.fetch_add(1, Ordering::SeqCst);
+            }
+            ConnectionEvent::Reconnecting { .. } => {
+                reconnecting_clone.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {}
+        })
+        .await
+        .expect("Failed to register connection event handler");
+
+    let result = client.connect("mqtt://127.0.0.1:19999").await;
+    assert!(result.is_err());
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        reconnecting_count.load(Ordering::SeqCst) >= 1,
+        "Should have at least one reconnection attempt in progress"
+    );
+
+    let attempts_before = reconnecting_count.load(Ordering::SeqCst);
+    client.disconnect().await.ok();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let attempts_after = reconnecting_count.load(Ordering::SeqCst);
+    assert!(
+        attempts_after <= attempts_before + 1,
+        "Reconnection attempts should stop after disconnect (before={attempts_before}, after={attempts_after})"
+    );
+    assert_eq!(
+        connected_count.load(Ordering::SeqCst),
+        0,
+        "Should not have connected after disconnect"
+    );
+    assert!(!client.is_connected().await);
+}
+
+#[tokio::test]
 async fn test_message_queuing_during_disconnection() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

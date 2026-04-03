@@ -44,6 +44,7 @@ pub use self::r#trait::MqttClientTrait;
 
 pub use builders::ConnectionEventCallback;
 
+use self::direct::AutomaticReconnectLifecycle;
 #[cfg(not(target_arch = "wasm32"))]
 use self::direct::DirectClientInner;
 
@@ -313,6 +314,7 @@ impl MqttClient {
         tracing::info!(client_id = %client_id, "Initiating MQTT disconnect");
 
         let mut inner = self.inner.write().await;
+        inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Stopped;
         match inner.disconnect().await {
             Ok(()) => {
                 tracing::info!(client_id = %client_id, "Successfully disconnected from MQTT broker");
