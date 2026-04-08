@@ -13,7 +13,7 @@ use crate::session::SessionState;
 use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -44,12 +44,59 @@ pub(super) struct PacketReaderContext {
     pub(super) pubcomp_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     pub(super) writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     pub(super) connected: Arc<AtomicBool>,
+    pub(super) connection_epoch: u64,
+    pub(super) current_connection_epoch: Arc<AtomicU64>,
     #[cfg(feature = "transport-quic")]
     pub(super) protocol_version: u8,
     pub(super) auth_handler: Option<Arc<dyn AuthHandler>>,
     pub(super) auth_method: Option<String>,
     pub(super) keepalive_state: Arc<Mutex<KeepaliveState>>,
     pub(super) codec_registry: Option<Arc<CodecRegistry>>,
+}
+
+impl PacketReaderContext {
+    fn owns_current_connection(&self) -> bool {
+        owns_current_connection(self.connection_epoch, &self.current_connection_epoch)
+    }
+
+    fn mark_disconnected_if_current(&self) {
+        if self.owns_current_connection() {
+            self.connected.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn clear_pending_if_current(&self) {
+        clear_pending_if_current(
+            self.connection_epoch,
+            &self.current_connection_epoch,
+            &self.puback_channels,
+            &self.pubcomp_channels,
+            &self.suback_channels,
+            &self.unsuback_channels,
+        );
+    }
+}
+
+fn owns_current_connection(connection_epoch: u64, current_connection_epoch: &AtomicU64) -> bool {
+    current_connection_epoch.load(Ordering::SeqCst) == connection_epoch
+}
+
+fn clear_pending_if_current(
+    connection_epoch: u64,
+    current_connection_epoch: &AtomicU64,
+    puback_channels: &Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
+    pubcomp_channels: &Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
+    suback_channels: &Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
+    unsuback_channels: &Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
+) {
+    if !owns_current_connection(connection_epoch, current_connection_epoch) {
+        return;
+    }
+
+    puback_channels.lock().drain();
+    pubcomp_channels.lock().drain();
+    suback_channels.lock().drain();
+    unsuback_channels.lock().drain();
 }
 
 pub(super) async fn packet_reader_task_with_responses(
@@ -109,7 +156,7 @@ pub(super) async fn packet_reader_task_with_responses(
                     Packet::Auth(ref auth) => {
                         if let Err(e) = handle_auth_packet(auth.clone(), &ctx).await {
                             tracing::error!("Error handling AUTH packet: {e}");
-                            ctx.connected.store(false, Ordering::SeqCst);
+                            ctx.mark_disconnected_if_current();
                             break;
                         }
                         continue;
@@ -129,24 +176,20 @@ pub(super) async fn packet_reader_task_with_responses(
                 .await
                 {
                     tracing::error!("Error handling packet: {e}");
-                    ctx.connected.store(false, Ordering::SeqCst);
+                    ctx.mark_disconnected_if_current();
                     break;
                 }
             }
             Err(e) => {
                 tracing::error!("Error reading packet: {e}");
-                ctx.connected.store(false, Ordering::SeqCst);
+                ctx.mark_disconnected_if_current();
                 break;
             }
         }
     }
 
-    ctx.connected.store(false, Ordering::SeqCst);
-
-    ctx.puback_channels.lock().drain();
-    ctx.pubcomp_channels.lock().drain();
-    ctx.suback_channels.lock().drain();
-    ctx.unsuback_channels.lock().drain();
+    ctx.mark_disconnected_if_current();
+    ctx.clear_pending_if_current();
 }
 
 async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Result<()> {
@@ -220,7 +263,7 @@ pub(super) async fn quic_stream_acceptor_task(
                     Err(e) => {
                         let reason = crate::transport::quic_error::parse_connection_error(&e);
                         tracing::error!("QUIC uni stream accept ended: {reason}");
-                        ctx.connected.store(false, Ordering::SeqCst);
+                        ctx.mark_disconnected_if_current();
                         break;
                     }
                 }
@@ -237,7 +280,7 @@ pub(super) async fn quic_stream_acceptor_task(
                     Err(e) => {
                         let reason = crate::transport::quic_error::parse_connection_error(&e);
                         tracing::error!("QUIC bi stream accept ended: {reason}");
-                        ctx.connected.store(false, Ordering::SeqCst);
+                        ctx.mark_disconnected_if_current();
                         break;
                     }
                 }
@@ -551,5 +594,60 @@ async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketRea
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_pending_if_current, owns_current_connection};
+    use crate::packet::suback::SubAckPacket;
+    use crate::packet::unsuback::UnsubAckPacket;
+    use crate::protocol::v5::reason_codes::ReasonCode;
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+
+    #[test]
+    fn stale_epoch_is_not_current() {
+        assert!(!owns_current_connection(1, &AtomicU64::new(2)));
+    }
+
+    #[test]
+    fn current_epoch_matches() {
+        assert!(owns_current_connection(2, &AtomicU64::new(2)));
+    }
+
+    #[test]
+    fn stale_epoch_does_not_clear_current_pending_channels() {
+        let puback_channels = Arc::new(Mutex::new(HashMap::new()));
+        let pubcomp_channels = Arc::new(Mutex::new(HashMap::new()));
+        let suback_channels = Arc::new(Mutex::new(HashMap::new()));
+        let unsuback_channels = Arc::new(Mutex::new(HashMap::new()));
+
+        let (puback_tx, _puback_rx) = oneshot::channel::<ReasonCode>();
+        let (pubcomp_tx, _pubcomp_rx) = oneshot::channel::<ReasonCode>();
+        let (suback_tx, _suback_rx) = oneshot::channel::<SubAckPacket>();
+        let (unsuback_tx, _unsuback_rx) = oneshot::channel::<UnsubAckPacket>();
+
+        puback_channels.lock().insert(1, puback_tx);
+        pubcomp_channels.lock().insert(2, pubcomp_tx);
+        suback_channels.lock().insert(3, suback_tx);
+        unsuback_channels.lock().insert(4, unsuback_tx);
+
+        clear_pending_if_current(
+            1,
+            &AtomicU64::new(2),
+            &puback_channels,
+            &pubcomp_channels,
+            &suback_channels,
+            &unsuback_channels,
+        );
+
+        assert_eq!(puback_channels.lock().len(), 1);
+        assert_eq!(pubcomp_channels.lock().len(), 1);
+        assert_eq!(suback_channels.lock().len(), 1);
+        assert_eq!(unsuback_channels.lock().len(), 1);
     }
 }

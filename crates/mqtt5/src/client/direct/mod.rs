@@ -9,7 +9,7 @@ mod unified;
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -69,6 +69,7 @@ pub(crate) enum SubscriptionPersistence {
 
 pub(crate) type StoredSubscription = (String, SubscriptionOptions, CallbackId);
 pub(crate) type StoredSubscriptions = Arc<Mutex<Vec<StoredSubscription>>>;
+pub(crate) type ConnectionEpoch = Arc<AtomicU64>;
 
 pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
@@ -84,6 +85,7 @@ pub struct DirectClientInner {
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub connected: Arc<AtomicBool>,
+    pub connection_epoch: ConnectionEpoch,
     pub callback_manager: Arc<CallbackManager>,
     pub packet_reader_handle: Option<JoinHandle<()>>,
     pub keepalive_handle: Option<JoinHandle<()>>,
@@ -139,6 +141,7 @@ impl DirectClientInner {
             quic_stream_manager: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
+            connection_epoch: Arc::new(AtomicU64::new(0)),
             callback_manager: Arc::new(CallbackManager::new()),
             packet_reader_handle: None,
             keepalive_handle: None,
@@ -180,6 +183,44 @@ impl DirectClientInner {
 
     pub fn set_connected(&self, connected: bool) {
         self.connected.store(connected, Ordering::SeqCst);
+    }
+
+    pub(crate) fn advance_connection_epoch(&self) -> u64 {
+        self.connection_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    async fn reset_connection_runtime(&mut self) {
+        self.stop_background_tasks();
+        self.keepalive_state.lock().reset();
+
+        #[cfg(feature = "transport-quic")]
+        if let Some(manager) = self.quic_stream_manager.take() {
+            manager.close_all_streams().await;
+        }
+
+        self.writer = None;
+        self.set_connected(false);
+
+        #[cfg(feature = "transport-quic")]
+        if let Some(conn) = self.quic_connection.take() {
+            conn.close(
+                quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::NoError.code()),
+                b"reset",
+            );
+        }
+        #[cfg(feature = "transport-quic")]
+        if let Some(endpoint) = self.quic_endpoint.take() {
+            tokio::spawn(async move {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle())
+                        .await;
+            });
+        }
+        #[cfg(feature = "transport-quic")]
+        {
+            self.stream_strategy = None;
+            self.quic_datagrams_enabled = false;
+        }
     }
 
     pub fn is_queue_on_disconnect(&self) -> bool {
@@ -288,6 +329,8 @@ impl DirectClientInner {
     ///
     /// Returns an error if the operation fails
     pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
+        self.reset_connection_runtime().await;
+
         let connect_packet = self.build_connect_packet().await;
 
         transport
@@ -365,6 +408,7 @@ impl DirectClientInner {
             }
         };
 
+        let connection_epoch = self.advance_connection_epoch();
         self.writer = Some(Arc::new(tokio::sync::Mutex::new(writer)));
         self.set_connected(true);
 
@@ -377,7 +421,7 @@ impl DirectClientInner {
         }
 
         tracing::debug!("Starting background tasks (packet reader and keepalive)");
-        self.start_background_tasks(reader)?;
+        self.start_background_tasks(reader, connection_epoch)?;
         tracing::debug!("Background tasks started successfully");
 
         Ok(ConnectResult {
@@ -449,35 +493,7 @@ impl DirectClientInner {
             }
         }
 
-        self.stop_background_tasks();
-
-        #[cfg(feature = "transport-quic")]
-        if let Some(manager) = self.quic_stream_manager.take() {
-            manager.close_all_streams().await;
-        }
-
-        self.set_connected(false);
-        self.writer = None;
-        #[cfg(feature = "transport-quic")]
-        if let Some(conn) = self.quic_connection.take() {
-            conn.close(
-                quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::NoError.code()),
-                b"disconnect",
-            );
-        }
-        #[cfg(feature = "transport-quic")]
-        if let Some(endpoint) = self.quic_endpoint.take() {
-            tokio::spawn(async move {
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle())
-                        .await;
-            });
-        }
-        #[cfg(feature = "transport-quic")]
-        {
-            self.stream_strategy = None;
-            self.quic_datagrams_enabled = false;
-        }
+        self.reset_connection_runtime().await;
 
         Ok(())
     }
@@ -1142,7 +1158,11 @@ impl DirectClientInner {
         will.map_or_else(Properties::default, |w| w.properties.clone().into())
     }
 
-    fn start_background_tasks(&mut self, reader: UnifiedReader) -> Result<()> {
+    fn start_background_tasks(
+        &mut self,
+        reader: UnifiedReader,
+        connection_epoch: u64,
+    ) -> Result<()> {
         let reader_session = self.session.clone();
         let reader_callbacks = self.callback_manager.clone();
         let suback_channels = self.pending_subacks.clone();
@@ -1164,6 +1184,8 @@ impl DirectClientInner {
             pubcomp_channels,
             writer: writer_for_reader,
             connected,
+            connection_epoch,
+            current_connection_epoch: self.connection_epoch.clone(),
             #[cfg(feature = "transport-quic")]
             protocol_version: self.options.protocol_version.as_u8(),
             auth_handler: self.auth_handler.clone(),
@@ -1186,6 +1208,7 @@ impl DirectClientInner {
             let keepalive_writer = writer_for_keepalive;
             let keepalive_connected = self.connected.clone();
             let keepalive_config = self.options.keepalive_config;
+            let current_connection_epoch = self.connection_epoch.clone();
             self.keepalive_handle = Some(tokio::spawn(async move {
                 tracing::debug!("💓 KEEPALIVE - Task starting");
                 keepalive_task_with_writer(
@@ -1193,6 +1216,8 @@ impl DirectClientInner {
                     keepalive_interval,
                     keepalive_state,
                     keepalive_connected,
+                    connection_epoch,
+                    current_connection_epoch,
                     keepalive_config,
                 )
                 .await;
