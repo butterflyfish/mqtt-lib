@@ -33,9 +33,6 @@ impl KeepaliveState {
     }
 
     pub(crate) fn record_ping_sent(&mut self) {
-        if self.has_outstanding_ping() {
-            return;
-        }
         self.last_ping_sent = Some(tokio::time::Instant::now());
     }
 
@@ -54,12 +51,19 @@ impl KeepaliveState {
     }
 }
 
-fn mark_disconnected_if_current(
+pub(crate) fn owns_current_connection(
+    connection_epoch: u64,
+    current_connection_epoch: &AtomicU64,
+) -> bool {
+    current_connection_epoch.load(Ordering::SeqCst) == connection_epoch
+}
+
+pub(crate) fn mark_disconnected_if_current(
     connected: &AtomicBool,
     connection_epoch: u64,
     current_connection_epoch: &AtomicU64,
 ) {
-    if current_connection_epoch.load(Ordering::SeqCst) == connection_epoch {
+    if owns_current_connection(connection_epoch, current_connection_epoch) {
         connected.store(false, Ordering::SeqCst);
     }
 }
@@ -191,9 +195,19 @@ pub(super) async fn flow_expiration_task(session: Arc<tokio::sync::RwLock<Sessio
 
 #[cfg(test)]
 mod tests {
-    use super::{mark_disconnected_if_current, KeepaliveState};
+    use super::{mark_disconnected_if_current, owns_current_connection, KeepaliveState};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use tokio::time::{Duration, Instant};
+
+    #[test]
+    fn stale_epoch_is_not_current() {
+        assert!(!owns_current_connection(1, &AtomicU64::new(2)));
+    }
+
+    #[test]
+    fn current_epoch_matches() {
+        assert!(owns_current_connection(2, &AtomicU64::new(2)));
+    }
 
     #[test]
     fn stale_keepalive_epoch_does_not_disconnect_current_connection() {
@@ -213,18 +227,6 @@ mod tests {
         mark_disconnected_if_current(&connected, 2, &current_epoch);
 
         assert!(!connected.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn record_ping_sent_does_not_overwrite_outstanding_ping() {
-        let mut state = KeepaliveState::default();
-        let first_ping = Instant::now() - Duration::from_secs(2);
-        state.last_ping_sent = Some(first_ping);
-
-        state.record_ping_sent();
-
-        assert_eq!(state.last_ping_sent, Some(first_ping));
-        assert!(state.has_outstanding_ping());
     }
 
     #[test]

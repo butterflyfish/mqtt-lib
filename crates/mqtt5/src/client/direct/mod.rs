@@ -189,7 +189,7 @@ impl DirectClientInner {
         self.connection_epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    async fn reset_connection_runtime(&mut self) {
+    async fn reset_connection_runtime(&mut self, reason: &[u8]) {
         self.stop_background_tasks();
         self.keepalive_state.lock().reset();
 
@@ -205,7 +205,7 @@ impl DirectClientInner {
         if let Some(conn) = self.quic_connection.take() {
             conn.close(
                 quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::NoError.code()),
-                b"reset",
+                reason,
             );
         }
         #[cfg(feature = "transport-quic")]
@@ -329,7 +329,7 @@ impl DirectClientInner {
     ///
     /// Returns an error if the operation fails
     pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
-        self.reset_connection_runtime().await;
+        self.reset_connection_runtime(b"reconnect").await;
 
         let connect_packet = self.build_connect_packet().await;
 
@@ -493,7 +493,7 @@ impl DirectClientInner {
             }
         }
 
-        self.reset_connection_runtime().await;
+        self.reset_connection_runtime(b"disconnect").await;
 
         Ok(())
     }
